@@ -99,8 +99,9 @@ func Proxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !res.Allowed {
-		http.Error(w, "Rate limit exceeded", 429)
-		return
+		w.Header().Set("x-ratelimit-allowed", "false")
+		// http.Error(w, "Rate limit exceeded", 429)
+		// return
 	}
 
 	reverseProxy.ServeHTTP(w, r)
