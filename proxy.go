@@ -167,8 +167,8 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 
 	if !allowed {
 		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		// return
 		log.Println("HTTP 423 urg...")
-		return
 	}
 
 	notaryProxy.ServeHTTP(w, r)
@@ -183,8 +183,8 @@ func Operator(w http.ResponseWriter, r *http.Request) {
 
 	if !allowed {
 		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		// return
 		log.Println("HTTP 423 urg...")
-		return
 	}
 
 	operatorProxy.ServeHTTP(w, r)
