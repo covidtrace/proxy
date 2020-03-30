@@ -119,18 +119,6 @@ func checkAllowed(prefix string, qph int, r *http.Request) (bool, error) {
 }
 
 func Notary(w http.ResponseWriter, r *http.Request) {
-	allowed, err := checkAllowed("notary", notaryQph, r)
-	if err != nil {
-		http.Error(w, err.Error(), 503)
-		return
-	}
-
-	if !allowed {
-		w.Header().Set("x-ratelimit-allowed", "false")
-		// http.Error(w, "Rate limit exceeded", 429)
-		// return
-	}
-
 	authorization := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
 	if len(authorization) != 2 {
 		http.Error(w, "Missing `Authorization` header", 401)
@@ -168,6 +156,18 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 	if iss, ok := claims["iss"]; !ok || iss != "covidtrace/operator" {
 		http.Error(w, "Invalid `iss` claim", 401)
 		return
+	}
+
+	allowed, err := checkAllowed("notary", notaryQph, r)
+	if err != nil {
+		http.Error(w, err.Error(), 503)
+		return
+	}
+
+	if !allowed {
+		w.Header().Set("x-ratelimit-allowed", "false")
+		// http.Error(w, "Rate limit exceeded", 429)
+		// return
 	}
 
 	notaryProxy.ServeHTTP(w, r)
