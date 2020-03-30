@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -121,12 +122,12 @@ func checkAllowed(prefix string, qph int, r *http.Request) (bool, error) {
 func Notary(w http.ResponseWriter, r *http.Request) {
 	authorization := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
 	if len(authorization) != 2 {
-		http.Error(w, "Missing `Authorization` header", 401)
+		http.Error(w, "Missing `Authorization` header", http.StatusUnauthorized)
 		return
 	}
 
 	if !strings.EqualFold(authorization[0], "bearer") {
-		http.Error(w, "Only `Bearer` authorization type supported", 401)
+		http.Error(w, "Only `Bearer` authorization type supported", http.StatusUnauthorized)
 		return
 	}
 
@@ -143,31 +144,31 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil || token == nil || !token.Valid {
-		http.Error(w, "Invalid `Authorization` header", 401)
+		http.Error(w, "Invalid `Authorization` header", http.StatusUnauthorized)
 		return
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		http.Error(w, "Invalid jwt token", 401)
+		http.Error(w, "Invalid jwt token", http.StatusUnauthorized)
 		return
 	}
 
 	if iss, ok := claims["iss"]; !ok || iss != "covidtrace/operator" {
-		http.Error(w, "Invalid `iss` claim", 401)
+		http.Error(w, "Invalid `iss` claim", http.StatusUnauthorized)
 		return
 	}
 
 	allowed, err := checkAllowed("notary", notaryQph, r)
 	if err != nil {
-		http.Error(w, err.Error(), 503)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if !allowed {
-		w.Header().Set("x-ratelimit-allowed", "false")
-		// http.Error(w, "Rate limit exceeded", 429)
-		// return
+		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		log.Println("HTTP 423 urg...")
+		return
 	}
 
 	notaryProxy.ServeHTTP(w, r)
@@ -176,14 +177,14 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 func Operator(w http.ResponseWriter, r *http.Request) {
 	allowed, err := checkAllowed("operator", operatorQph, r)
 	if err != nil {
-		http.Error(w, err.Error(), 503)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if !allowed {
-		w.Header().Set("x-ratelimit-allowed", "false")
-		// http.Error(w, "Rate limit exceeded", 429)
-		// return
+		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		log.Println("HTTP 423 urg...")
+		return
 	}
 
 	operatorProxy.ServeHTTP(w, r)
