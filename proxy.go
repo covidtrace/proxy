@@ -26,6 +26,10 @@ var operatorBackend string
 var operatorQph int
 var operatorProxy httputil.ReverseProxy
 
+var emailsBackend string
+var emailsQph int
+var emailsProxy httputil.ReverseProxy
+
 var limiter *redisrate.Limiter
 
 func getEnv(key string) string {
@@ -101,6 +105,10 @@ func init() {
 	operatorBackend = getEnv("OPERATOR_BACKEND")
 	operatorQph = getEnvInt("OPERATOR_QPH")
 	operatorProxy = httputil.ReverseProxy{Director: buildDirector(operatorBackend)}
+
+	emailsBackend = getEnv("EMAILS_BACKEND")
+	emailsQph = getEnvInt("EMAILS_QPH")
+	emailsProxy = httputil.ReverseProxy{Director: buildDirector(emailsBackend)}
 
 	redisHost := getEnv("REDIS_HOST")
 	rdb := redis.NewClient(&redis.Options{
@@ -188,4 +196,20 @@ func Operator(w http.ResponseWriter, r *http.Request) {
 	}
 
 	operatorProxy.ServeHTTP(w, r)
+}
+
+func Emails(w http.ResponseWriter, r *http.Request) {
+	allowed, err := checkAllowed("emails", emailsQph, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !allowed {
+		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		// return
+		log.Println("HTTP 423 urg...")
+	}
+
+	emailsProxy.ServeHTTP(w, r)
 }
