@@ -3,20 +3,20 @@ package proxy
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/dgrijalva/jwt-go"
+	"github.com/covidtrace/jwt"
 	"github.com/go-redis/redis/v7"
 	redisrate "github.com/go-redis/redis_rate/v8"
 )
 
-var jwtSigningKey []byte
+var issuer *jwt.Issuer
 
 var notaryBackend string
 var notaryQph int
@@ -96,7 +96,12 @@ func buildDirector(b string) func(r *http.Request) {
 }
 
 func init() {
-	jwtSigningKey = []byte(getEnv("JWT_SIGNING_KEY"))
+	dur, err := time.ParseDuration("1h")
+	if err != nil {
+		panic(err)
+	}
+
+	issuer = jwt.NewIssuer([]byte(getEnv("JWT_SIGNING_KEY")), "covidtrace/operator", "covidtrace/token", dur)
 
 	notaryBackend = getEnv("NOTARY_BACKEND")
 	notaryQph = getEnvInt("NOTARY_QPH")
@@ -117,14 +122,17 @@ func init() {
 	limiter = redisrate.NewLimiter(rdb)
 }
 
-func checkAllowed(prefix string, qph int, r *http.Request) (bool, error) {
-	key := fmt.Sprintf("%s/%s", prefix, r.Header.Get("X-Forwarded-For"))
+func checkAllow(key string, qph int) (bool, error) {
 	res, err := limiter.Allow(key, redisrate.PerHour(qph))
 	if err != nil {
 		return false, err
 	}
 
 	return res.Allowed, nil
+}
+
+func checkAllowReq(prefix string, qph int, r *http.Request) (bool, error) {
+	return checkAllow(fmt.Sprintf("%s/%s", prefix, r.Header.Get("X-Forwarded-For")), qph)
 }
 
 func Notary(w http.ResponseWriter, r *http.Request) {
@@ -139,76 +147,51 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := jwt.Parse(authorization[1], func(t *jwt.Token) (interface{}, error) {
-		if t == nil {
-			return nil, fmt.Errorf("Token is nil")
-		}
-
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("Unexpected signing method: %v", t.Header["alg"])
-		}
-
-		return jwtSigningKey, nil
-	})
-
-	if err != nil || token == nil || !token.Valid {
-		http.Error(w, "Invalid `Authorization` header", http.StatusUnauthorized)
+	hash, err := issuer.Validate(authorization[1])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		http.Error(w, "Invalid jwt token", http.StatusUnauthorized)
-		return
-	}
-
-	if iss, ok := claims["iss"]; !ok || iss != "covidtrace/operator" {
-		http.Error(w, "Invalid `iss` claim", http.StatusUnauthorized)
-		return
-	}
-
-	allowed, err := checkAllowed("notary", notaryQph, r)
+	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", hash), notaryQph)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if !allowed {
-		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-		// return
-		log.Println("HTTP 423 urg...")
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		return
 	}
 
 	notaryProxy.ServeHTTP(w, r)
 }
 
 func Operator(w http.ResponseWriter, r *http.Request) {
-	allowed, err := checkAllowed("operator", operatorQph, r)
+	allowed, err := checkAllowReq("operator", operatorQph, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if !allowed {
-		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-		// return
-		log.Println("HTTP 423 urg...")
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		return
 	}
 
 	operatorProxy.ServeHTTP(w, r)
 }
 
 func Emails(w http.ResponseWriter, r *http.Request) {
-	allowed, err := checkAllowed("emails", emailsQph, r)
+	allowed, err := checkAllowReq("emails", emailsQph, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if !allowed {
-		// http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-		// return
-		log.Println("HTTP 423 urg...")
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		return
 	}
 
 	emailsProxy.ServeHTTP(w, r)
