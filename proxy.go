@@ -147,13 +147,13 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, _, err := issuer.Validate(authorization[1])
+	claims, err := issuer.Validate(authorization[1])
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", hash), notaryQph)
+	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", claims.Hash), notaryQph)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
