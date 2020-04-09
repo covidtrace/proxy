@@ -147,7 +147,7 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, err := issuer.Validate(authorization[1])
+	hash, _, err := issuer.Validate(authorization[1])
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
