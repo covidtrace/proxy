@@ -135,6 +135,8 @@ func checkAllowReq(prefix string, qph int, r *http.Request) (bool, error) {
 	return checkAllow(fmt.Sprintf("%s/%s", prefix, r.Header.Get("X-Forwarded-For")), qph)
 }
 
+// Notary is the cloud function that handles requests to the notary service, rate limiting
+// using the JWT hash key
 func Notary(w http.ResponseWriter, r *http.Request) {
 	authorization := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
 	if len(authorization) != 2 {
@@ -167,6 +169,7 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 	notaryProxy.ServeHTTP(w, r)
 }
 
+// Operator handles proxying requests to the Operator service, rate limiting by X-Forwarded-For
 func Operator(w http.ResponseWriter, r *http.Request) {
 	allowed, err := checkAllowReq("operator", operatorQph, r)
 	if err != nil {
@@ -182,6 +185,7 @@ func Operator(w http.ResponseWriter, r *http.Request) {
 	operatorProxy.ServeHTTP(w, r)
 }
 
+// Emails proxies requests to the internal email service
 func Emails(w http.ResponseWriter, r *http.Request) {
 	allowed, err := checkAllowReq("emails", emailsQph, r)
 	if err != nil {
