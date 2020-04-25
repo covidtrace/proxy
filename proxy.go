@@ -16,20 +16,45 @@ import (
 	redisrate "github.com/go-redis/redis_rate/v8"
 )
 
+type backend struct {
+	qph   int
+	proxy httputil.ReverseProxy
+}
+
+func buildDirector(b string) func(r *http.Request) {
+	bu, err := url.Parse(b)
+	if err != nil {
+		panic(err)
+	}
+
+	return func(r *http.Request) {
+		r.URL.Scheme = bu.Scheme
+		r.URL.Host = bu.Host
+		r.Host = bu.Host
+
+		if jwt, err := getGoogleJWT(b); err == nil {
+			r.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jwt))
+		}
+	}
+}
+
+func newBackend(prefix string) backend {
+	endpoint := getEnv(fmt.Sprintf("%s_BACKEND", prefix))
+	qph := getEnvInt(fmt.Sprintf("%s_QPH", prefix))
+
+	return backend{
+		qph: qph,
+		proxy: httputil.ReverseProxy{
+			Director: buildDirector(endpoint),
+		},
+	}
+}
+
 var issuer *jwt.Issuer
-
-var notaryBackend string
-var notaryQph int
-var notaryProxy httputil.ReverseProxy
-
-var operatorBackend string
-var operatorQph int
-var operatorProxy httputil.ReverseProxy
-
-var emailsBackend string
-var emailsQph int
-var emailsProxy httputil.ReverseProxy
-
+var notary backend
+var elevatedNotary backend
+var operator backend
+var emails backend
 var limiter *redisrate.Limiter
 
 func getEnv(key string) string {
@@ -78,23 +103,6 @@ func getGoogleJWT(audience string) (string, error) {
 	return string(body), nil
 }
 
-func buildDirector(b string) func(r *http.Request) {
-	bu, err := url.Parse(b)
-	if err != nil {
-		panic(err)
-	}
-
-	return func(r *http.Request) {
-		r.URL.Scheme = bu.Scheme
-		r.URL.Host = bu.Host
-		r.Host = bu.Host
-
-		if jwt, err := getGoogleJWT(b); err == nil {
-			r.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jwt))
-		}
-	}
-}
-
 func init() {
 	dur, err := time.ParseDuration("1h")
 	if err != nil {
@@ -102,24 +110,15 @@ func init() {
 	}
 
 	issuer = jwt.NewIssuer([]byte(getEnv("JWT_SIGNING_KEY")), "covidtrace/operator", "covidtrace/token", dur)
+	notary = newBackend("NOTARY")
+	elevatedNotary = newBackend("ELEVATED_NOTARY")
+	operator = newBackend("OPERATOR")
+	emails = newBackend("EMAILS")
 
-	notaryBackend = getEnv("NOTARY_BACKEND")
-	notaryQph = getEnvInt("NOTARY_QPH")
-	notaryProxy = httputil.ReverseProxy{Director: buildDirector(notaryBackend)}
-
-	operatorBackend = getEnv("OPERATOR_BACKEND")
-	operatorQph = getEnvInt("OPERATOR_QPH")
-	operatorProxy = httputil.ReverseProxy{Director: buildDirector(operatorBackend)}
-
-	emailsBackend = getEnv("EMAILS_BACKEND")
-	emailsQph = getEnvInt("EMAILS_QPH")
-	emailsProxy = httputil.ReverseProxy{Director: buildDirector(emailsBackend)}
-
-	redisHost := getEnv("REDIS_HOST")
-	rdb := redis.NewClient(&redis.Options{
-		Addr: redisHost,
+	rc := redis.NewClient(&redis.Options{
+		Addr: getEnv("REDIS_HOST"),
 	})
-	limiter = redisrate.NewLimiter(rdb)
+	limiter = redisrate.NewLimiter(rc)
 }
 
 func checkAllow(key string, qph int) (bool, error) {
@@ -155,7 +154,7 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", claims.Hash), notaryQph)
+	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", claims.Hash), notary.qph)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -166,12 +165,46 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	notaryProxy.ServeHTTP(w, r)
+	notary.proxy.ServeHTTP(w, r)
+}
+
+// ElevatedNotary is the cloud function that handles requests to the elevated notary
+// service, ensuring the token is elevated and rate limiting using the JWT hash key
+func ElevatedNotary(w http.ResponseWriter, r *http.Request) {
+	authorization := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
+	if len(authorization) != 2 {
+		http.Error(w, "Missing `Authorization` header", http.StatusUnauthorized)
+		return
+	}
+
+	if !strings.EqualFold(authorization[0], "bearer") {
+		http.Error(w, "Only `Bearer` authorization type supported", http.StatusUnauthorized)
+		return
+	}
+
+	claims, err := issuer.WithAud("covidtrace/elevated").Validate(authorization[1])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "elevatedNotary", claims.Hash), elevatedNotary.qph)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !allowed {
+		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+
+	elevatedNotary.proxy.ServeHTTP(w, r)
 }
 
 // Operator handles proxying requests to the Operator service, rate limiting by X-Forwarded-For
 func Operator(w http.ResponseWriter, r *http.Request) {
-	allowed, err := checkAllowReq("operator", operatorQph, r)
+	allowed, err := checkAllowReq("operator", operator.qph, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -182,12 +215,12 @@ func Operator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	operatorProxy.ServeHTTP(w, r)
+	operator.proxy.ServeHTTP(w, r)
 }
 
 // Emails proxies requests to the internal email service
 func Emails(w http.ResponseWriter, r *http.Request) {
-	allowed, err := checkAllowReq("emails", emailsQph, r)
+	allowed, err := checkAllowReq("emails", emails.qph, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -198,5 +231,5 @@ func Emails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	emailsProxy.ServeHTTP(w, r)
+	emails.proxy.ServeHTTP(w, r)
 }
