@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-for function in Notary Operator Emails; do
+for function in Notary ElevatedNotary Operator Emails; do
   gcloud functions deploy "${function}" \
     --runtime go113 \
     --memory 128 \
