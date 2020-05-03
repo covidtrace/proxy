@@ -150,11 +150,17 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 
 	claims, err := issuer.Validate(authorization[1])
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", claims.Hash), notary.qph)
+	hash := claims.Hash
+	if hash == "" {
+		http.Error(w, "Missing hash", http.StatusUnauthorized)
+		return
+	}
+
+	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", hash), notary.qph)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -184,11 +190,16 @@ func ElevatedNotary(w http.ResponseWriter, r *http.Request) {
 
 	claims, err := issuer.WithAud("covidtrace/elevated").Validate(authorization[1])
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
-	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "elevatedNotary", claims.Hash), elevatedNotary.qph)
+	if claims.Role != "elevated_user" {
+		http.Error(w, "role is not `elevated_user`", http.StatusUnauthorized)
+		return
+	}
+
+	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "elevatedNotary", claims.Identifier), elevatedNotary.qph)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
