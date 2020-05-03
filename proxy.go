@@ -1,17 +1,18 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/covidtrace/jwt"
+	"github.com/covidtrace/utils/env"
+	httputils "github.com/covidtrace/utils/http"
 	"github.com/go-redis/redis/v7"
 	redisrate "github.com/go-redis/redis_rate/v8"
 )
@@ -39,8 +40,12 @@ func buildDirector(b string) func(r *http.Request) {
 }
 
 func newBackend(prefix string) backend {
-	endpoint := getEnv(fmt.Sprintf("%s_BACKEND", prefix))
-	qph := getEnvInt(fmt.Sprintf("%s_QPH", prefix))
+	endpoint := env.MustGet(fmt.Sprintf("%s_BACKEND", prefix))
+
+	qph, err := strconv.Atoi(env.MustGet(fmt.Sprintf("%s_QPH", prefix)))
+	if err != nil {
+		panic(err)
+	}
 
 	return backend{
 		qph: qph,
@@ -56,24 +61,6 @@ var elevatedNotary backend
 var operator backend
 var emails backend
 var limiter *redisrate.Limiter
-
-func getEnv(key string) string {
-	val := os.Getenv(key)
-	if val == "" {
-		panic(fmt.Errorf("%s is a required env var", key))
-	}
-
-	return val
-}
-
-func getEnvInt(key string) int {
-	val, err := strconv.Atoi(getEnv(key))
-	if err != nil {
-		panic(err)
-	}
-
-	return val
-}
 
 func getGoogleJWT(audience string) (string, error) {
 	req, err := http.NewRequest(
@@ -109,14 +96,14 @@ func init() {
 		panic(err)
 	}
 
-	issuer = jwt.NewIssuer([]byte(getEnv("JWT_SIGNING_KEY")), "covidtrace/operator", "covidtrace/token", dur)
+	issuer = jwt.NewIssuer([]byte(env.MustGet("JWT_SIGNING_KEY")), "covidtrace/operator", "covidtrace/token", dur)
 	notary = newBackend("NOTARY")
 	elevatedNotary = newBackend("ELEVATED_NOTARY")
 	operator = newBackend("OPERATOR")
 	emails = newBackend("EMAILS")
 
 	rc := redis.NewClient(&redis.Options{
-		Addr: getEnv("REDIS_HOST"),
+		Addr: env.MustGet("REDIS_HOST"),
 	})
 	limiter = redisrate.NewLimiter(rc)
 }
@@ -137,37 +124,32 @@ func checkAllowReq(prefix string, qph int, r *http.Request) (bool, error) {
 // Notary is the cloud function that handles requests to the notary service, rate limiting
 // using the JWT hash key
 func Notary(w http.ResponseWriter, r *http.Request) {
-	authorization := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
-	if len(authorization) != 2 {
-		http.Error(w, "Missing `Authorization` header", http.StatusUnauthorized)
-		return
-	}
-
-	if !strings.EqualFold(authorization[0], "bearer") {
-		http.Error(w, "Only `Bearer` authorization type supported", http.StatusUnauthorized)
-		return
-	}
-
-	claims, err := issuer.Validate(authorization[1])
+	authorization, err := httputils.GetAuthorization(r, "bearer")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		httputils.ReplyError(w, err, http.StatusUnauthorized)
+		return
+	}
+
+	claims, err := issuer.Validate(authorization)
+	if err != nil {
+		httputils.ReplyError(w, err, http.StatusUnauthorized)
 		return
 	}
 
 	hash := claims.Hash
 	if hash == "" {
-		http.Error(w, "Missing hash", http.StatusUnauthorized)
+		httputils.ReplyError(w, errors.New("Missing hash"), http.StatusUnauthorized)
 		return
 	}
 
 	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "notary", hash), notary.qph)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httputils.ReplyInternalServerError(w, err)
 		return
 	}
 
 	if !allowed {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		httputils.ReplyError(w, errors.New("Rate limit exceeded"), http.StatusTooManyRequests)
 		return
 	}
 
@@ -177,36 +159,31 @@ func Notary(w http.ResponseWriter, r *http.Request) {
 // ElevatedNotary is the cloud function that handles requests to the elevated notary
 // service, ensuring the token is elevated and rate limiting using the JWT hash key
 func ElevatedNotary(w http.ResponseWriter, r *http.Request) {
-	authorization := strings.SplitN(r.Header.Get("Authorization"), " ", 2)
-	if len(authorization) != 2 {
-		http.Error(w, "Missing `Authorization` header", http.StatusUnauthorized)
+	authorization, err := httputils.GetAuthorization(r, "bearer")
+	if err != nil {
+		httputils.ReplyError(w, err, http.StatusUnauthorized)
 		return
 	}
 
-	if !strings.EqualFold(authorization[0], "bearer") {
-		http.Error(w, "Only `Bearer` authorization type supported", http.StatusUnauthorized)
-		return
-	}
-
-	claims, err := issuer.WithAud("covidtrace/elevated").Validate(authorization[1])
+	claims, err := issuer.WithAud("covidtrace/elevated").Validate(authorization)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
 	if claims.Role != "elevated_user" {
-		http.Error(w, "role is not `elevated_user`", http.StatusUnauthorized)
+		httputils.ReplyError(w, errors.New("role is not `elevated_user`"), http.StatusUnauthorized)
 		return
 	}
 
 	allowed, err := checkAllow(fmt.Sprintf("%s/%s", "elevatedNotary", claims.Identifier), elevatedNotary.qph)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httputils.ReplyInternalServerError(w, err)
 		return
 	}
 
 	if !allowed {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		httputils.ReplyError(w, errors.New("Rate limit exceeded"), http.StatusTooManyRequests)
 		return
 	}
 
@@ -217,12 +194,12 @@ func ElevatedNotary(w http.ResponseWriter, r *http.Request) {
 func Operator(w http.ResponseWriter, r *http.Request) {
 	allowed, err := checkAllowReq("operator", operator.qph, r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httputils.ReplyInternalServerError(w, err)
 		return
 	}
 
 	if !allowed {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		httputils.ReplyError(w, errors.New("Rate limit exceeded"), http.StatusTooManyRequests)
 		return
 	}
 
@@ -233,12 +210,12 @@ func Operator(w http.ResponseWriter, r *http.Request) {
 func Emails(w http.ResponseWriter, r *http.Request) {
 	allowed, err := checkAllowReq("emails", emails.qph, r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httputils.ReplyInternalServerError(w, err)
 		return
 	}
 
 	if !allowed {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+		httputils.ReplyError(w, errors.New("Rate limit exceeded"), http.StatusTooManyRequests)
 		return
 	}
 
